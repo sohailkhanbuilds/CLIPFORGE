@@ -3,7 +3,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
-revision = '0002_creator_authorization_evidence'
+revision = '0002_auth_evidence'
 down_revision = '0001_initial'
 branch_labels = None
 depends_on = None
