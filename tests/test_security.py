@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from uuid import uuid4
 
 # Isolate tests from the production Neon database.
@@ -130,7 +131,7 @@ def test_task_creation_accepts_valid_api_key():
         headers=API_HEADERS,
         json={
             "video_url": "https://www.youtube.com/watch?v=securitytest",
-            "creator": "Security Test Creator",
+            "creator": "Approved Test Creator",
             "channel_id": channel_id,
         },
     )
@@ -213,8 +214,18 @@ def create_task():
     return response.json()
 
 
+def approve_task_for_worker(task_id):
+    with SessionLocal() as db:
+        task = db.get(ClipTask, task_id)
+        task.agent_plan = '{"agents":{"safety_review":{"approved_for_human_review":true,"blockers":[]}}}'
+        task.agent_status = "approved_for_execution"
+        task.human_approved_at = datetime.now(timezone.utc)
+        db.commit()
+
+
 def test_task_lifecycle_claim_complete():
     created = create_task()
+    approve_task_for_worker(created["id"])
     assert created["status"] == "queued"
     assert created["attempt_count"] == 0
 
@@ -257,6 +268,7 @@ def test_worker_cannot_complete_unclaimed_task():
 
 def test_failed_task_can_be_retried_and_claimed_again():
     created = create_task()
+    approve_task_for_worker(created["id"])
     claimed = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS).json()["task"]
     failed = client.post(
         f"/api/worker/tasks/{created['id']}/fail",
