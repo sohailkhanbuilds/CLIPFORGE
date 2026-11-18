@@ -7,11 +7,22 @@ os.environ["CLIPFORGE_API_KEY"] = "test-api-key"
 os.environ["CLIPFORGE_ADMIN_KEY"] = "test-admin-key"
 
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, SessionLocal, ClipTask
+from sqlalchemy import delete
+import pytest
 
 client = TestClient(app)
 API_HEADERS = {"X-API-Key": "test-api-key"}
 ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
+
+
+@pytest.fixture(autouse=True)
+def isolate_task_queue():
+    # Each test gets an empty queue so claims cannot pick up another test's task.
+    with SessionLocal() as db:
+        db.execute(delete(ClipTask))
+        db.commit()
+    yield
 
 
 def test_health_is_public():
