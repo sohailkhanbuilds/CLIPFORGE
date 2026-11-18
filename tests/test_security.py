@@ -118,7 +118,7 @@ def test_task_creation_rejects_missing_api_key():
         "/api/tasks",
         json={
             "video_url": "https://www.youtube.com/watch?v=securitytest",
-            "creator": "Security Test Creator",
+            "creator": "Approved Test Creator",
         },
     )
     assert response.status_code == 401
@@ -226,6 +226,7 @@ def approve_task_for_worker(task_id):
 def test_task_lifecycle_claim_complete():
     created = create_task()
     approve_task_for_worker(created["id"])
+    approve_task_for_worker(created["id"])
     assert created["status"] == "queued"
     assert created["attempt_count"] == 0
 
@@ -268,6 +269,7 @@ def test_worker_cannot_complete_unclaimed_task():
 
 def test_failed_task_can_be_retried_and_claimed_again():
     created = create_task()
+    approve_task_for_worker(created["id"])
     approve_task_for_worker(created["id"])
     claimed = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS).json()["task"]
     failed = client.post(
