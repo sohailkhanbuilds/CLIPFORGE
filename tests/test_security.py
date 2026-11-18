@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from uuid import uuid4
 
 # Isolate tests from the production Neon database.
@@ -7,11 +8,22 @@ os.environ["CLIPFORGE_API_KEY"] = "test-api-key"
 os.environ["CLIPFORGE_ADMIN_KEY"] = "test-admin-key"
 
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, SessionLocal, ClipTask
+from sqlalchemy import delete
+import pytest
 
 client = TestClient(app)
 API_HEADERS = {"X-API-Key": "test-api-key"}
 ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
+
+
+@pytest.fixture(autouse=True)
+def isolate_task_queue():
+    # Each test gets an empty queue so claims cannot pick up another test's task.
+    with SessionLocal() as db:
+        db.execute(delete(ClipTask))
+        db.commit()
+    yield
 
 
 def test_health_is_public():
@@ -106,19 +118,21 @@ def test_task_creation_rejects_missing_api_key():
         "/api/tasks",
         json={
             "video_url": "https://www.youtube.com/watch?v=securitytest",
-            "creator": "Security Test Creator",
+            "creator": "Approved Test Creator",
         },
     )
     assert response.status_code == 401
 
 
 def test_task_creation_accepts_valid_api_key():
+    channel_id = create_authorized_channel()
     response = client.post(
         "/api/tasks",
         headers=API_HEADERS,
         json={
             "video_url": "https://www.youtube.com/watch?v=securitytest",
-            "creator": "Security Test Creator",
+            "creator": "Approved Test Creator",
+            "channel_id": channel_id,
         },
     )
     assert response.status_code == 201
@@ -167,3 +181,150 @@ def test_admin_cannot_authorize_without_permission_evidence():
         json={"proof_reference": "no"},
     )
     assert response.status_code == 422
+
+
+# Task lifecycle tests
+os.environ["CLIPFORGE_WORKER_KEY"] = "test-worker-key"
+WORKER_HEADERS = {"X-Worker-Key": "test-worker-key"}
+
+
+def create_authorized_channel():
+    channel = client.post("/api/channels", headers=API_HEADERS, json={
+        "name": "Approved Test Creator", "platform": "youtube",
+        "url": f"https://www.youtube.com/@approved-{uuid4().hex}",
+    })
+    assert channel.status_code == 201
+    channel_id = channel.json()["id"]
+    approved = client.post(f"/api/channels/{channel_id}/authorize", headers=ADMIN_HEADERS,
+                           json={"proof_reference": "verified-creator-consent-001"})
+    assert approved.status_code == 200
+    enabled = client.patch(f"/api/channels/{channel_id}?enabled=true", headers=API_HEADERS)
+    assert enabled.status_code == 200 and enabled.json()["enabled"] is True
+    return channel_id
+
+
+def create_task():
+    channel_id = create_authorized_channel()
+    response = client.post(
+        "/api/tasks",
+        headers=API_HEADERS,
+        json={"video_url": "https://www.youtube.com/watch?v=workflowtest", "creator": "Approved Test Creator", "channel_id": channel_id},
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def approve_task_for_worker(task_id):
+    with SessionLocal() as db:
+        task = db.get(ClipTask, task_id)
+        task.agent_plan = '{"agents":{"safety_review":{"approved_for_human_review":true,"blockers":[]}}}'
+        task.agent_status = "approved_for_execution"
+        task.human_approved_at = datetime.now(timezone.utc)
+        db.commit()
+
+
+def test_task_lifecycle_claim_complete():
+    created = create_task()
+    approve_task_for_worker(created["id"])
+    assert created["status"] == "queued"
+    assert created["attempt_count"] == 0
+
+    claimed = client.post(
+        "/api/worker/tasks/claim?worker_id=worker-test",
+        headers=WORKER_HEADERS,
+    )
+    assert claimed.status_code == 200
+    task = claimed.json()["task"]
+    assert task["id"] == created["id"]
+    assert task["status"] == "processing"
+    assert task["attempt_count"] == 1
+    assert task["worker_id"] == "worker-test"
+    assert task["started_at"] is not None
+
+    completed = client.post(
+        f"/api/worker/tasks/{created['id']}/complete",
+        headers=WORKER_HEADERS,
+        json={"result_reference": "drive://clip-output-001"},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+    assert completed.json()["finished_at"] is not None
+
+
+def test_worker_endpoints_require_worker_key():
+    response = client.post("/api/worker/tasks/claim")
+    assert response.status_code == 401
+
+
+def test_worker_cannot_complete_unclaimed_task():
+    created = create_task()
+    response = client.post(
+        f"/api/worker/tasks/{created['id']}/complete",
+        headers=WORKER_HEADERS,
+        json={},
+    )
+    assert response.status_code == 409
+
+
+def test_failed_task_can_be_retried_and_claimed_again():
+    created = create_task()
+    approve_task_for_worker(created["id"])
+    approve_task_for_worker(created["id"])
+    claimed = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS).json()["task"]
+    failed = client.post(
+        f"/api/worker/tasks/{created['id']}/fail",
+        headers=WORKER_HEADERS,
+        json={"error_message": "Temporary worker error"},
+    )
+    assert failed.status_code == 200
+    assert failed.json()["status"] == "failed"
+    assert failed.json()["error_message"] == "Temporary worker error"
+
+    retried = client.post(f"/api/tasks/{created['id']}/retry", headers=API_HEADERS)
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "queued"
+    assert retried.json()["error_message"] is None
+
+    claimed_again = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS).json()["task"]
+    assert claimed_again["id"] == created["id"]
+    assert claimed_again["attempt_count"] == 2
+
+
+def test_task_retry_rejects_non_failed_task():
+    created = create_task()
+    response = client.post(f"/api/tasks/{created['id']}/retry", headers=API_HEADERS)
+    assert response.status_code == 409
+
+
+def test_task_list_supports_status_filter_and_pagination():
+    created = create_task()
+    response = client.get("/api/tasks?status=queued&limit=10&offset=0", headers=API_HEADERS)
+    assert response.status_code == 200
+    assert any(task["id"] == created["id"] for task in response.json())
+
+
+def test_task_creation_rejects_unapproved_channel():
+    channel = client.post("/api/channels", headers=API_HEADERS, json={
+        "name": "Unapproved Creator", "platform": "youtube",
+        "url": f"https://www.youtube.com/@unapproved-{uuid4().hex}",
+    })
+    assert channel.status_code == 201
+    response = client.post("/api/tasks", headers=API_HEADERS, json={
+        "video_url": "https://www.youtube.com/watch?v=unauthorized",
+        "creator": "Unapproved Creator", "channel_id": channel.json()["id"],
+    })
+    assert response.status_code == 403
+
+
+def test_worker_cannot_claim_without_agent_approval():
+    create_task()
+    response = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS)
+    assert response.status_code == 200
+    assert response.json()["task"] is None
+
+
+def test_agent_plan_routes_require_api_or_admin_key():
+    response = client.get("/api/tasks/999/plan")
+    assert response.status_code == 401
+    response = client.post("/api/tasks/999/approve")
+    assert response.status_code == 401
