@@ -181,14 +181,14 @@ async def main() -> None:
             print("Claude/OpusClip did not complete. Browser windows are being left open for inspection.")
             raise
 
-        urls = list(dict.fromkeys(re.findall(r"https?://[^\\s)\\]>]+", result)))
+        urls = list(dict.fromkeys(re.findall(r"https?://[^\s)\]>]+", result)))
         clip_urls = [u.rstrip(".,;") for u in urls if "opus.pro" in u.lower() or "opusclip" in u.lower()]
         if clip_urls:
-            message = "✅ CLIPFORGE: Claude's response indicates the OpusClip task is finished. Please verify the clips in OpusClip.\\n\\n" + "\\n".join(clip_urls[:20])
+            message = "✅ CLIPFORGE: Claude's response indicates the OpusClip task is finished. Please verify the clips in OpusClip.\n\n" + "\n".join(clip_urls[:20])
         else:
             message = (
                 "⚠️ CLIPFORGE: Claude responded, but I could not detect direct OpusClip clip links. "
-                "Check Claude/OpusClip before treating the clips as ready.\\n\\n" + result[-2500:]
+                "Check Claude/OpusClip before treating the clips as ready.\n\n" + result[-2500:]
             )
         await send_telegram(message)
         print("\nTelegram notification sent (if bot credentials are configured).")
