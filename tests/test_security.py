@@ -1,4 +1,5 @@
 import os
+from uuid import uuid4
 
 # Isolate tests from the production Neon database.
 os.environ["DATABASE_URL"] = "sqlite:///./test_clipforge.db"
@@ -34,14 +35,15 @@ def test_api_route_accepts_valid_api_key():
     assert response.status_code == 200
 
 
-def test_new_channel_is_always_unapproved():
+def create_unapproved_channel():
+    handle = uuid4().hex
     response = client.post(
         "/api/channels",
         headers=API_HEADERS,
         json={
             "name": "Security Test Creator",
             "platform": "youtube",
-            "url": "https://www.youtube.com/@security-test-creator",
+            "url": f"https://www.youtube.com/@security-test-{handle}",
             "authorized": True,
             "enabled": True,
         },
@@ -53,7 +55,7 @@ def test_new_channel_is_always_unapproved():
 
 
 def test_normal_api_key_cannot_authorize_creator():
-    channel_id = test_new_channel_is_always_unapproved()
+    channel_id = create_unapproved_channel()
     response = client.post(
         f"/api/channels/{channel_id}/authorize",
         headers=API_HEADERS,
@@ -62,7 +64,7 @@ def test_normal_api_key_cannot_authorize_creator():
 
 
 def test_admin_can_authorize_and_revoke_creator():
-    channel_id = test_new_channel_is_always_unapproved()
+    channel_id = create_unapproved_channel()
 
     approved = client.post(
         f"/api/channels/{channel_id}/authorize",
@@ -81,7 +83,7 @@ def test_admin_can_authorize_and_revoke_creator():
 
 
 def test_unapproved_creator_cannot_be_enabled():
-    channel_id = test_new_channel_is_always_unapproved()
+    channel_id = create_unapproved_channel()
     response = client.patch(
         f"/api/channels/{channel_id}?enabled=true",
         headers=API_HEADERS,
