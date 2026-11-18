@@ -6,7 +6,7 @@ import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, select, update
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, select, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.agent_system import AgentConfigurationError, AgentExecutionError, ClipForgeOrchestrator
@@ -53,7 +53,7 @@ class ClipTask(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     worker_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     result_reference: Mapped[Optional[str]] = mapped_column(String(700), nullable=True)
-    channel_id: Mapped[Optional[int]] = mapped_column(ForeignKey("channels.id"), nullable=True)
+    channel_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     agent_plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     agent_status: Mapped[str] = mapped_column(String(40), default="not_started")
     human_approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
