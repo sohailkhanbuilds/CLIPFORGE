@@ -10,9 +10,11 @@ from urllib.parse import urlparse
 
 import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
 PROFILE_DIR = ROOT / "claude_chrome_profile"
+load_dotenv(ROOT.parent / ".env")
 CLAUDE_URL = "https://claude.ai/new"
 
 
@@ -102,6 +104,7 @@ async def main() -> None:
         print("Waiting for Claude/OpusClip to finish. Keep this Chrome window open.")
 
         previous = ""
+        first_response_at = time.monotonic()
         stable_since = time.monotonic()
         final_text = ""
         deadline = time.monotonic() + 60 * 60
@@ -116,7 +119,7 @@ async def main() -> None:
             if snapshot != previous:
                 previous = snapshot
                 stable_since = time.monotonic()
-            elif time.monotonic() - stable_since >= 25 and len(snapshot) > 500:
+            elif (time.monotonic() - first_response_at >= 60 and time.monotonic() - stable_since >= 60 and len(snapshot) > 500):
                 final_text = snapshot
                 break
 
