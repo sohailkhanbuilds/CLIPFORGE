@@ -49,6 +49,7 @@ class ClipTask(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     worker_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    result_reference: Mapped[Optional[str]] = mapped_column(String(700), nullable=True)
 
 
 class ChannelIn(BaseModel):
@@ -112,6 +113,7 @@ def task_dict(t: ClipTask):
         "finished_at": t.finished_at.isoformat() if t.finished_at else None,
         "attempt_count": t.attempt_count, "max_attempts": MAX_TASK_ATTEMPTS,
         "error_message": t.error_message, "worker_id": t.worker_id,
+        "result_reference": t.result_reference,
     }
 
 
@@ -261,19 +263,25 @@ def claim_task(worker_id: str = "clipforge-worker"):
         raise HTTPException(422, "worker_id must be 1-120 characters")
     with SessionLocal() as db:
         # Conditional UPDATE makes claiming atomic: only one worker can win a queued task.
+        candidate_id = db.scalar(
+            select(ClipTask.id)
+            .where(ClipTask.status == "queued", ClipTask.attempt_count < MAX_TASK_ATTEMPTS)
+            .order_by(ClipTask.created_at, ClipTask.id)
+            .limit(1)
+        )
+        if candidate_id is None:
+            return {"task": None, "message": "No queued tasks available"}
+        # The status predicate prevents two workers from claiming the same task.
         task_id = db.scalar(
             update(ClipTask)
-            .where(ClipTask.id == select(ClipTask.id).where(
-                ClipTask.status == "queued",
-                ClipTask.attempt_count < MAX_TASK_ATTEMPTS
-            ).order_by(ClipTask.created_at, ClipTask.id).limit(1).scalar_subquery())
+            .where(ClipTask.id == candidate_id, ClipTask.status == "queued")
             .values(status="processing", started_at=utcnow(), updated_at=utcnow(),
                     attempt_count=ClipTask.attempt_count + 1, worker_id=worker_id,
                     error_message=None)
             .returning(ClipTask.id)
         )
         if task_id is None:
-            return {"task": None, "message": "No queued tasks available"}
+            return {"task": None, "message": "Task was claimed by another worker; poll again"}
         db.commit()
         task = db.get(ClipTask, task_id)
         return {"task": task_dict(task)}
@@ -291,6 +299,7 @@ def complete_task(task_id: int, payload: TaskCompletionIn):
         task.finished_at = utcnow()
         task.updated_at = utcnow()
         task.error_message = None
+        task.result_reference = payload.result_reference
         db.commit()
         db.refresh(task)
         return task_dict(task)
