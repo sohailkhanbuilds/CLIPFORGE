@@ -90,3 +90,65 @@ def test_unapproved_creator_cannot_be_enabled():
     )
     assert response.status_code == 200
     assert response.json()["enabled"] is False
+
+
+def test_task_routes_reject_missing_api_key():
+    response = client.get("/api/tasks")
+    assert response.status_code == 401
+
+
+def test_task_creation_rejects_missing_api_key():
+    response = client.post(
+        "/api/tasks",
+        json={
+            "video_url": "https://www.youtube.com/watch?v=securitytest",
+            "creator": "Security Test Creator",
+        },
+    )
+    assert response.status_code == 401
+
+
+def test_task_creation_accepts_valid_api_key():
+    response = client.post(
+        "/api/tasks",
+        headers=API_HEADERS,
+        json={
+            "video_url": "https://www.youtube.com/watch?v=securitytest",
+            "creator": "Security Test Creator",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "queued"
+
+
+def test_api_key_cannot_revoke_creator_authorization():
+    channel_id = create_unapproved_channel()
+    response = client.delete(
+        f"/api/channels/{channel_id}/authorization",
+        headers=API_HEADERS,
+    )
+    assert response.status_code == 401
+
+
+def test_authorized_channel_stays_disabled_after_revocation():
+    channel_id = create_unapproved_channel()
+    approved = client.post(
+        f"/api/channels/{channel_id}/authorize",
+        headers=ADMIN_HEADERS,
+    )
+    assert approved.status_code == 200
+
+    enabled = client.patch(
+        f"/api/channels/{channel_id}?enabled=true",
+        headers=API_HEADERS,
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+
+    revoked = client.delete(
+        f"/api/channels/{channel_id}/authorization",
+        headers=ADMIN_HEADERS,
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["authorized"] is False
+    assert revoked.json()["enabled"] is False
