@@ -59,6 +59,7 @@ def test_normal_api_key_cannot_authorize_creator():
     response = client.post(
         f"/api/channels/{channel_id}/authorize",
         headers=API_HEADERS,
+        json={"proof_reference": "creator-email-approval-001"},
     )
     assert response.status_code == 401
 
@@ -69,9 +70,12 @@ def test_admin_can_authorize_and_revoke_creator():
     approved = client.post(
         f"/api/channels/{channel_id}/authorize",
         headers=ADMIN_HEADERS,
+        json={"proof_reference": "creator-email-approval-001"},
     )
     assert approved.status_code == 200
     assert approved.json()["authorized"] is True
+    assert approved.json()["authorization_proof"] == "creator-email-approval-001"
+    assert approved.json()["authorized_at"] is not None
 
     revoked = client.delete(
         f"/api/channels/{channel_id}/authorization",
@@ -135,6 +139,7 @@ def test_authorized_channel_stays_disabled_after_revocation():
     approved = client.post(
         f"/api/channels/{channel_id}/authorize",
         headers=ADMIN_HEADERS,
+        json={"proof_reference": "creator-email-approval-002"},
     )
     assert approved.status_code == 200
 
@@ -152,3 +157,13 @@ def test_authorized_channel_stays_disabled_after_revocation():
     assert revoked.status_code == 200
     assert revoked.json()["authorized"] is False
     assert revoked.json()["enabled"] is False
+
+
+def test_admin_cannot_authorize_without_permission_evidence():
+    channel_id = create_unapproved_channel()
+    response = client.post(
+        f"/api/channels/{channel_id}/authorize",
+        headers=ADMIN_HEADERS,
+        json={"proof_reference": "no"},
+    )
+    assert response.status_code == 422
