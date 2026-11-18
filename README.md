@@ -1,14 +1,15 @@
 # CLIPFORGE
 
-CLIPFORGE is a local browser operator for creating short-form clips through the **Claude chat UI + OpusClip connector**. It does not call Claude's API or OpusClip APIs, and it never uploads to YouTube.
+CLIPFORGE is a local browser operator that researches a video in the **ChatGPT chat UI**, passes the research brief into the **Claude chat UI + OpusClip connector**, then sends a Telegram notification. It does not call ChatGPT, Claude, or OpusClip APIs, and it never uploads to YouTube.
 
-## Current scope
+## Workflow
 
-1. The local Windows operator asks for a YouTube URL, clip count, style, and preferred duration.
-2. It opens a dedicated Chrome profile and navigates to Claude.
-3. You sign in to Claude and connect/enable OpusClip in Claude if you have not already done so.
-4. The operator enters the task into the visible Claude chat and submits it.
-5. It waits for the visible response to settle, then sends a Telegram message with detected OpusClip links or a warning if readiness could not be verified.
+1. The local Windows operator asks for a YouTube URL, requested clip count, style, and duration.
+2. It opens a dedicated Chrome profile for ChatGPT. You sign in if needed.
+3. It submits a research request through the visible ChatGPT chat UI and captures the assistant's research response.
+4. It opens a separate dedicated Chrome profile for Claude. You sign in and ensure the OpusClip connector is enabled.
+5. It passes the source URL, clip instructions, and ChatGPT research brief into Claude's visible chat UI.
+6. It waits for Claude's response and sends a Telegram message with detected OpusClip links, or a warning if direct links cannot be verified.
 
 You review/download the finished clips yourself and upload them to YouTube yourself.
 
@@ -19,17 +20,18 @@ You review/download the finished clips yourself and upload them to YouTube yours
 - Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to `.env`.
 - Run `local_agent\\run_windows.bat`.
 
-The first run installs Playwright and creates a separate Chrome profile at `local_agent\\claude_chrome_profile`. Sign in to Claude in that Chrome window. Your normal Chrome profile and passwords are not read.
+The first run installs Playwright and creates separate persistent Chrome profiles at `local_agent\\chatgpt_chrome_profile` and `local_agent\\claude_chrome_profile`. Sign in to both services in their respective windows. Your normal Chrome profile and passwords are not read.
 
 ## Telegram setup
 
-Create a bot with Telegram's @BotFather, then obtain your chat ID. Start a conversation with your bot before testing notifications. Keep the bot token private and only store it in the local `.env` file; never commit it.
+Create a bot with Telegram's @BotFather, obtain your chat ID, and start a conversation with the bot before testing notifications. Keep the bot token private in the local `.env` file; never commit it.
 
 ## Important limitations
 
-- This is a first browser-automation foundation, not a claim of fully tested end-to-end OpusClip execution. Claude's UI and connector confirmation flows can change.
-- You may need to complete Claude sign-in, connector authorization, or an OpusClip confirmation manually.
-- Completion detection is heuristic. If the operator cannot find an OpusClip link, Telegram will explicitly warn that readiness was not verified.
-- The local PC must remain on, connected to the internet, and the Chrome window must remain open while the task runs.
+- This is an initial browser-automation foundation, not a claim of fully tested end-to-end operation. ChatGPT/Claude UI selectors and connector flows can change.
+- ChatGPT research is only as reliable as the source/transcript it can actually access. The research prompt requires inaccessible information and uncertain timestamps to be labelled rather than invented.
+- You may need to complete sign-in, connector authorization, or OpusClip confirmation manually.
+- Completion detection is heuristic. A stable Claude response is not absolute proof that OpusClip finished processing; inspect the Telegram message and OpusClip links.
+- The local PC must remain on, connected to the internet, and both Chrome sessions must remain open while the task runs.
 - No YouTube upload or publishing is performed.
 - Only use videos you own or have permission to edit and repurpose.
