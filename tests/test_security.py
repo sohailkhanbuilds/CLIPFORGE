@@ -226,7 +226,6 @@ def approve_task_for_worker(task_id):
 def test_task_lifecycle_claim_complete():
     created = create_task()
     approve_task_for_worker(created["id"])
-    approve_task_for_worker(created["id"])
     assert created["status"] == "queued"
     assert created["attempt_count"] == 0
 
