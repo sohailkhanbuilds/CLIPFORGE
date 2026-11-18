@@ -10,6 +10,7 @@ from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.agent_system import AgentConfigurationError, AgentExecutionError, ClipForgeOrchestrator
+from app.transcripts import TranscriptUnavailable, fetch_youtube_transcript
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./clipforge.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -72,7 +73,7 @@ class TaskIn(BaseModel):
 
 
 class AgentAnalysisIn(BaseModel):
-    transcript: str = Field(min_length=20, max_length=150000)
+    transcript: Optional[str] = Field(default=None, min_length=20, max_length=150000)
 
 
 class AuthorizationIn(BaseModel):
@@ -352,9 +353,12 @@ async def analyze_task(task_id: int, payload: AgentAnalysisIn):
         if not channel or not channel.authorized or not channel.enabled:
             raise HTTPException(403, "Creator authorization is missing or revoked")
         try:
+            transcript = payload.transcript or fetch_youtube_transcript(task.video_url)
             plan = await ClipForgeOrchestrator().run(
-                video_url=task.video_url, creator=task.creator, transcript=payload.transcript
+                video_url=task.video_url, creator=task.creator, transcript=transcript
             )
+        except TranscriptUnavailable as exc:
+            raise HTTPException(422, str(exc)) from exc
         except AgentConfigurationError as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
