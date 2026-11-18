@@ -21,16 +21,9 @@ def upgrade():
     for column in additions:
         if column.name not in columns:
             op.add_column("clip_tasks", column)
-    foreign_keys = {fk.get("name") for fk in inspector.get_foreign_keys("clip_tasks")}
-    if "fk_clip_tasks_channel_id_channels" not in foreign_keys:
-        op.create_foreign_key(
-            "fk_clip_tasks_channel_id_channels", "clip_tasks", "channels",
-            ["channel_id"], ["id"], ondelete="RESTRICT"
-        )
 
 
 def downgrade():
-    op.drop_constraint("fk_clip_tasks_channel_id_channels", "clip_tasks", type_="foreignkey")
     op.drop_column("clip_tasks", "human_approved_at")
     op.drop_column("clip_tasks", "agent_status")
     op.drop_column("clip_tasks", "agent_plan")
