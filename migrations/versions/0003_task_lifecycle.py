@@ -19,6 +19,7 @@ def upgrade():
         sa.Column("attempt_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("worker_id", sa.String(length=120), nullable=True),
+        sa.Column("result_reference", sa.String(length=700), nullable=True),
     ]
     for column in additions:
         if column.name not in columns:
