@@ -124,12 +124,14 @@ def test_task_creation_rejects_missing_api_key():
 
 
 def test_task_creation_accepts_valid_api_key():
+    channel_id = create_authorized_channel()
     response = client.post(
         "/api/tasks",
         headers=API_HEADERS,
         json={
             "video_url": "https://www.youtube.com/watch?v=securitytest",
             "creator": "Security Test Creator",
+            "channel_id": channel_id,
         },
     )
     assert response.status_code == 201
@@ -185,11 +187,27 @@ os.environ["CLIPFORGE_WORKER_KEY"] = "test-worker-key"
 WORKER_HEADERS = {"X-Worker-Key": "test-worker-key"}
 
 
+def create_authorized_channel():
+    channel = client.post("/api/channels", headers=API_HEADERS, json={
+        "name": "Approved Test Creator", "platform": "youtube",
+        "url": f"https://www.youtube.com/@approved-{uuid4().hex}",
+    })
+    assert channel.status_code == 201
+    channel_id = channel.json()["id"]
+    approved = client.post(f"/api/channels/{channel_id}/authorize", headers=ADMIN_HEADERS,
+                           json={"proof_reference": "verified-creator-consent-001"})
+    assert approved.status_code == 200
+    enabled = client.patch(f"/api/channels/{channel_id}?enabled=true", headers=API_HEADERS)
+    assert enabled.status_code == 200 and enabled.json()["enabled"] is True
+    return channel_id
+
+
 def create_task():
+    channel_id = create_authorized_channel()
     response = client.post(
         "/api/tasks",
         headers=API_HEADERS,
-        json={"video_url": "https://www.youtube.com/watch?v=workflowtest", "creator": "Approved Test Creator"},
+        json={"video_url": "https://www.youtube.com/watch?v=workflowtest", "creator": "Approved Test Creator", "channel_id": channel_id},
     )
     assert response.status_code == 201
     return response.json()
@@ -270,3 +288,30 @@ def test_task_list_supports_status_filter_and_pagination():
     response = client.get("/api/tasks?status=queued&limit=10&offset=0", headers=API_HEADERS)
     assert response.status_code == 200
     assert any(task["id"] == created["id"] for task in response.json())
+
+
+def test_task_creation_rejects_unapproved_channel():
+    channel = client.post("/api/channels", headers=API_HEADERS, json={
+        "name": "Unapproved Creator", "platform": "youtube",
+        "url": f"https://www.youtube.com/@unapproved-{uuid4().hex}",
+    })
+    assert channel.status_code == 201
+    response = client.post("/api/tasks", headers=API_HEADERS, json={
+        "video_url": "https://www.youtube.com/watch?v=unauthorized",
+        "creator": "Unapproved Creator", "channel_id": channel.json()["id"],
+    })
+    assert response.status_code == 403
+
+
+def test_worker_cannot_claim_without_agent_approval():
+    create_task()
+    response = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS)
+    assert response.status_code == 200
+    assert response.json()["task"] is None
+
+
+def test_agent_plan_routes_require_api_or_admin_key():
+    response = client.get("/api/tasks/999/plan")
+    assert response.status_code == 401
+    response = client.post("/api/tasks/999/approve")
+    assert response.status_code == 401
