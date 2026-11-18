@@ -27,6 +27,8 @@ class Channel(Base):
     authorized: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    authorization_proof: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    authorized_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class ClipTask(Base):
@@ -48,6 +50,10 @@ class ChannelIn(BaseModel):
 class TaskIn(BaseModel):
     video_url: HttpUrl
     creator: str = Field(min_length=1, max_length=120)
+
+
+class AuthorizationIn(BaseModel):
+    proof_reference: str = Field(min_length=5, max_length=500)
 
 
 def _check_secret(provided: Optional[str], env_name: str, label: str):
@@ -74,6 +80,8 @@ def channel_dict(c: Channel):
         "url": c.url,
         "authorized": c.authorized,
         "enabled": c.enabled,
+        "authorization_proof": c.authorization_proof,
+        "authorized_at": c.authorized_at.isoformat() if c.authorized_at else None,
     }
 
 
@@ -131,13 +139,15 @@ def add_channel(payload: ChannelIn):
 
 
 @app.post("/api/channels/{channel_id}/authorize", dependencies=[Depends(require_admin_key)])
-def authorize_channel(channel_id: int):
-    # The operator must verify creator permission outside this API before calling this route.
+def authorize_channel(channel_id: int, payload: AuthorizationIn):
+    # The operator must verify creator permission and record its evidence before calling this route.
     with SessionLocal() as db:
         channel = db.get(Channel, channel_id)
         if not channel:
             raise HTTPException(404, "Channel not found")
         channel.authorized = True
+        channel.authorization_proof = payload.proof_reference
+        channel.authorized_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(channel)
         return channel_dict(channel)
