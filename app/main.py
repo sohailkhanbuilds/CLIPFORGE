@@ -1,4 +1,3 @@
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 import hmac
@@ -46,8 +45,6 @@ class ChannelIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     platform: str = Field(default="youtube", pattern="^(youtube|twitch)$")
     url: HttpUrl
-    authorized: bool = False
-    enabled: bool = False
 
 
 class TaskIn(BaseModel):
@@ -55,13 +52,20 @@ class TaskIn(BaseModel):
     creator: str = Field(min_length=1, max_length=120)
 
 
+def _check_secret(provided: Optional[str], env_name: str, label: str):
+    expected = os.getenv(env_name)
+    if not expected:
+        raise HTTPException(status_code=503, detail=f"{label} is not configured")
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail=f"Invalid or missing {label}")
+
+
 def require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
-    expected_key = os.getenv("CLIPFORGE_API_KEY")
-    if not expected_key:
-        raise HTTPException(status_code=503, detail="API authentication is not configured")
-    if not x_api_key or not hmac.compare_digest(x_api_key, expected_key):
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-    return True
+    _check_secret(x_api_key, "CLIPFORGE_API_KEY", "API key")
+
+
+def require_admin_key(x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key")):
+    _check_secret(x_admin_key, "CLIPFORGE_ADMIN_KEY", "admin key")
 
 
 def channel_dict(c: Channel):
@@ -87,8 +91,8 @@ def task_dict(t: ClipTask):
 
 app = FastAPI(
     title="CLIPFORGE API",
-    version="0.2.0",
-    description="Creator-authorized clipping workflow control plane. API routes require an X-API-Key header.",
+    version="0.3.0",
+    description="Creator-authorized clipping workflow. API routes require X-API-Key; creator approval requires X-Admin-Key.",
 )
 
 
@@ -114,13 +118,13 @@ def add_channel(payload: ChannelIn):
         existing = db.scalar(select(Channel).where(Channel.url == str(payload.url)))
         if existing:
             raise HTTPException(409, "Channel URL already exists")
-        # Authorization is deliberately opt-in. No channel is monitored by default.
+        # A newly registered creator is always unapproved and disabled.
         channel = Channel(
             name=payload.name,
             platform=payload.platform,
             url=str(payload.url),
-            authorized=payload.authorized,
-            enabled=payload.enabled and payload.authorized,
+            authorized=False,
+            enabled=False,
         )
         db.add(channel)
         db.commit()
@@ -128,18 +132,40 @@ def add_channel(payload: ChannelIn):
         return channel_dict(channel)
 
 
-@app.patch("/api/channels/{channel_id}", dependencies=[Depends(require_api_key)])
-def update_channel(channel_id: int, authorized: Optional[bool] = None, enabled: Optional[bool] = None):
+@app.post("/api/channels/{channel_id}/authorize", dependencies=[Depends(require_admin_key)])
+def authorize_channel(channel_id: int):
+    # The operator must verify creator permission outside this API before calling this route.
     with SessionLocal() as db:
         channel = db.get(Channel, channel_id)
         if not channel:
             raise HTTPException(404, "Channel not found")
-        if authorized is not None:
-            channel.authorized = authorized
+        channel.authorized = True
+        db.commit()
+        db.refresh(channel)
+        return channel_dict(channel)
+
+
+@app.delete("/api/channels/{channel_id}/authorization", dependencies=[Depends(require_admin_key)])
+def revoke_channel_authorization(channel_id: int):
+    with SessionLocal() as db:
+        channel = db.get(Channel, channel_id)
+        if not channel:
+            raise HTTPException(404, "Channel not found")
+        channel.authorized = False
+        channel.enabled = False
+        db.commit()
+        db.refresh(channel)
+        return channel_dict(channel)
+
+
+@app.patch("/api/channels/{channel_id}", dependencies=[Depends(require_api_key)])
+def update_channel(channel_id: int, enabled: Optional[bool] = None):
+    with SessionLocal() as db:
+        channel = db.get(Channel, channel_id)
+        if not channel:
+            raise HTTPException(404, "Channel not found")
         if enabled is not None:
-            channel.enabled = enabled
-        if not channel.authorized:
-            channel.enabled = False
+            channel.enabled = enabled and channel.authorized
         db.commit()
         db.refresh(channel)
         return channel_dict(channel)
