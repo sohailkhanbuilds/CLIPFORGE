@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
 from typing import Optional
 import hmac
+import json
 import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, select, update
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, select, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+
+from app.agent_system import AgentConfigurationError, AgentExecutionError, ClipForgeOrchestrator
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./clipforge.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -50,6 +53,10 @@ class ClipTask(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     worker_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     result_reference: Mapped[Optional[str]] = mapped_column(String(700), nullable=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    agent_plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    agent_status: Mapped[str] = mapped_column(String(40), default="not_started")
+    human_approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class ChannelIn(BaseModel):
@@ -61,6 +68,11 @@ class ChannelIn(BaseModel):
 class TaskIn(BaseModel):
     video_url: HttpUrl
     creator: str = Field(min_length=1, max_length=120)
+    channel_id: int = Field(gt=0)
+
+
+class AgentAnalysisIn(BaseModel):
+    transcript: str = Field(min_length=20, max_length=150000)
 
 
 class AuthorizationIn(BaseModel):
@@ -113,7 +125,8 @@ def task_dict(t: ClipTask):
         "finished_at": t.finished_at.isoformat() if t.finished_at else None,
         "attempt_count": t.attempt_count, "max_attempts": MAX_TASK_ATTEMPTS,
         "error_message": t.error_message, "worker_id": t.worker_id,
-        "result_reference": t.result_reference,
+        "result_reference": t.result_reference, "channel_id": t.channel_id,
+        "agent_status": t.agent_status, "human_approved": t.human_approved_at is not None,
     }
 
 
@@ -229,7 +242,12 @@ def get_task(task_id: int):
 @app.post("/api/tasks", status_code=201, dependencies=[Depends(require_api_key)])
 def enqueue_task(payload: TaskIn):
     with SessionLocal() as db:
-        task = ClipTask(video_url=str(payload.video_url), creator=payload.creator, status="queued", attempt_count=0)
+        channel = db.get(Channel, payload.channel_id)
+        if not channel or not channel.authorized or not channel.enabled:
+            raise HTTPException(403, "Creator channel must be authorized and enabled before task creation")
+        if channel.name.casefold() != payload.creator.casefold():
+            raise HTTPException(422, "Creator name does not match the authorized channel")
+        task = ClipTask(video_url=str(payload.video_url), creator=payload.creator, channel_id=channel.id, status="queued", attempt_count=0)
         db.add(task)
         db.commit()
         db.refresh(task)
@@ -266,7 +284,8 @@ def claim_task(worker_id: str = "clipforge-worker"):
         # Conditional UPDATE makes claiming atomic: only one worker can win a queued task.
         candidate_id = db.scalar(
             select(ClipTask.id)
-            .where(ClipTask.status == "queued", ClipTask.attempt_count < MAX_TASK_ATTEMPTS)
+            .join(Channel, ClipTask.channel_id == Channel.id)
+            .where(ClipTask.status == "queued", ClipTask.attempt_count < MAX_TASK_ATTEMPTS, Channel.authorized.is_(True), Channel.enabled.is_(True), ClipTask.human_approved_at.is_not(None))
             .order_by(ClipTask.created_at, ClipTask.id)
             .limit(1)
         )
@@ -321,3 +340,66 @@ def fail_task(task_id: int, payload: TaskFailureIn):
         db.commit()
         db.refresh(task)
         return task_dict(task)
+
+
+@app.post("/api/tasks/{task_id}/analyze", dependencies=[Depends(require_api_key)])
+async def analyze_task(task_id: int, payload: AgentAnalysisIn):
+    with SessionLocal() as db:
+        task = db.get(ClipTask, task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        channel = db.get(Channel, task.channel_id)
+        if not channel or not channel.authorized or not channel.enabled:
+            raise HTTPException(403, "Creator authorization is missing or revoked")
+        try:
+            plan = await ClipForgeOrchestrator().run(
+                video_url=task.video_url, creator=task.creator, transcript=payload.transcript
+            )
+        except AgentConfigurationError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except AgentExecutionError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        task.agent_plan = json.dumps(plan, ensure_ascii=False)
+        task.agent_status = "awaiting_human_approval"
+        task.human_approved_at = None
+        task.updated_at = utcnow()
+        db.commit()
+        return {"task_id": task.id, "agent_status": task.agent_status, "plan": plan}
+
+
+@app.get("/api/tasks/{task_id}/plan", dependencies=[Depends(require_api_key)])
+def get_agent_plan(task_id: int):
+    with SessionLocal() as db:
+        task = db.get(ClipTask, task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        return {
+            "task_id": task.id,
+            "agent_status": task.agent_status,
+            "human_approved": task.human_approved_at is not None,
+            "plan": json.loads(task.agent_plan) if task.agent_plan else None,
+        }
+
+
+@app.post("/api/tasks/{task_id}/approve", dependencies=[Depends(require_admin_key)])
+def approve_agent_plan(task_id: int):
+    with SessionLocal() as db:
+        task = db.get(ClipTask, task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        channel = db.get(Channel, task.channel_id)
+        if not channel or not channel.authorized or not channel.enabled:
+            raise HTTPException(403, "Creator authorization is missing or revoked")
+        if not task.agent_plan:
+            raise HTTPException(409, "Run the agent pipeline before approving")
+        plan = json.loads(task.agent_plan)
+        safety = plan.get("agents", {}).get("safety_review", {})
+        if not safety.get("approved_for_human_review") or safety.get("blockers"):
+            raise HTTPException(409, "Safety agent reported blockers; plan cannot be approved")
+        task.human_approved_at = utcnow()
+        task.agent_status = "approved_for_execution"
+        task.updated_at = utcnow()
+        db.commit()
+        return {"task_id": task.id, "agent_status": task.agent_status, "human_approved": True}
