@@ -251,6 +251,7 @@ def retry_task(task_id: int):
         task.started_at = None
         task.finished_at = None
         task.worker_id = None
+        task.result_reference = None
         task.updated_at = utcnow()
         db.commit()
         db.refresh(task)
