@@ -167,3 +167,95 @@ def test_admin_cannot_authorize_without_permission_evidence():
         json={"proof_reference": "no"},
     )
     assert response.status_code == 422
+
+
+# Task lifecycle tests
+os.environ["CLIPFORGE_WORKER_KEY"] = "test-worker-key"
+WORKER_HEADERS = {"X-Worker-Key": "test-worker-key"}
+
+
+def create_task():
+    response = client.post(
+        "/api/tasks",
+        headers=API_HEADERS,
+        json={"video_url": "https://www.youtube.com/watch?v=workflowtest", "creator": "Approved Test Creator"},
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_task_lifecycle_claim_complete():
+    created = create_task()
+    assert created["status"] == "queued"
+    assert created["attempt_count"] == 0
+
+    claimed = client.post(
+        "/api/worker/tasks/claim?worker_id=worker-test",
+        headers=WORKER_HEADERS,
+    )
+    assert claimed.status_code == 200
+    task = claimed.json()["task"]
+    assert task["id"] == created["id"]
+    assert task["status"] == "processing"
+    assert task["attempt_count"] == 1
+    assert task["worker_id"] == "worker-test"
+    assert task["started_at"] is not None
+
+    completed = client.post(
+        f"/api/worker/tasks/{created['id']}/complete",
+        headers=WORKER_HEADERS,
+        json={"result_reference": "drive://clip-output-001"},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+    assert completed.json()["finished_at"] is not None
+
+
+def test_worker_endpoints_require_worker_key():
+    response = client.post("/api/worker/tasks/claim")
+    assert response.status_code == 401
+
+
+def test_worker_cannot_complete_unclaimed_task():
+    created = create_task()
+    response = client.post(
+        f"/api/worker/tasks/{created['id']}/complete",
+        headers=WORKER_HEADERS,
+        json={},
+    )
+    assert response.status_code == 409
+
+
+def test_failed_task_can_be_retried_and_claimed_again():
+    created = create_task()
+    claimed = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS).json()["task"]
+    failed = client.post(
+        f"/api/worker/tasks/{created['id']}/fail",
+        headers=WORKER_HEADERS,
+        json={"error_message": "Temporary worker error"},
+    )
+    assert failed.status_code == 200
+    assert failed.json()["status"] == "failed"
+    assert failed.json()["error_message"] == "Temporary worker error"
+
+    retried = client.post(f"/api/tasks/{created['id']}/retry", headers=API_HEADERS)
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "queued"
+    assert retried.json()["error_message"] is None
+
+    claimed_again = client.post("/api/worker/tasks/claim", headers=WORKER_HEADERS).json()["task"]
+    assert claimed_again["id"] == created["id"]
+    assert claimed_again["attempt_count"] == 2
+
+
+def test_task_retry_rejects_non_failed_task():
+    created = create_task()
+    response = client.post(f"/api/tasks/{created['id']}/retry", headers=API_HEADERS)
+    assert response.status_code == 409
+
+
+def test_task_list_supports_status_filter_and_pagination():
+    created = create_task()
+    response = client.get("/api/tasks?status=queued&limit=10&offset=0", headers=API_HEADERS)
+    assert response.status_code == 200
+    assert any(task["id"] == created["id"] for task in response.json())
