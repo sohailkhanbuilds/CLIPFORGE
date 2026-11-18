@@ -38,8 +38,6 @@ class ClipTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-Base.metadata.create_all(engine)
-
 
 class ChannelIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
